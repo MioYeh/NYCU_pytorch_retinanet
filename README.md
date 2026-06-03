@@ -27,8 +27,11 @@ apt-get install tk-dev python-tk
 3. 安裝 Python 套件：
 
 ```bash
-pip install pandas pycocotools opencv-python requests
-pip install tifffile zarr scikit-image  # WSI 推論需要
+# 請依你的 CUDA / CPU 環境安裝相容版本的 PyTorch 與 torchvision
+pip install torch torchvision
+
+pip install numpy pandas pycocotools opencv-python requests
+pip install tifffile zarr scikit-image  # WSI 推論與 IoU_v5 共用 preprocessing 需要
 ```
 
 ---
@@ -43,16 +46,43 @@ pip install tifffile zarr scikit-image  # WSI 推論需要
 python train.py --dataset coco --coco_path ../coco --depth 50
 ```
 
-**CSV 自定義格式：**
+**CSV 自定義格式（預設使用原本 `csv_eval` mAP 驗證）：**
 
 ```bash
 python train.py --dataset csv \
     --csv_train <訓練標注.csv> \
     --csv_classes <類別列表.csv> \
-    --csv_val <驗證標注.csv>
+    --csv_val <驗證標注.csv> \
+    --output <輸出資料夾>
 ```
 
-> `--csv_val` 為選填，省略時不執行驗證。
+> `--csv_val` 為選填，省略時不執行驗證。`--output` 指定的資料夾不能已存在，訓練過程會在其中寫入 checkpoint 與 `training_log.csv`。
+
+**CSV 自定義格式（訓練過程改用 `IoU_v5.py` 計算驗證 AP）：**
+
+```bash
+python train.py --dataset csv \
+    --csv_train <訓練標注.csv> \
+    --csv_classes <類別列表.csv> \
+    --csv_val <驗證標注.csv> \
+    --csv_val_images <驗證影像資料夾> \
+    --eval_metric iouv5 \
+    --eval_min_side 704 \
+    --eval_max_side 1920 \
+    --eval_conf_score 0.05 \
+    --eval_iou_threshold 0.5 \
+    --eval_class_label 0 \
+    --eval_max_detections 150 \
+    --output <輸出資料夾>
+```
+
+`--eval_metric iouv5` 會在每個 epoch 結束後走共用的 IoU_v5 prediction pipeline，輸出格式會先轉成 `IoU_v5.py` 使用的 `{image_name: [[x1, y1, x2, y2, score], ...]}`，再計算 AP / best precision / best recall。此模式必須提供 `--csv_val_images`，因為 IoU_v5 JSON 需要列出驗證資料夾中的所有影像（包含沒有標註的影像）。
+
+`training_log.csv` 欄位目前為：
+
+```text
+epoch,cls_loss,reg_loss,total_loss,eval_metric,eval_AP
+```
 
 ---
 
@@ -100,24 +130,55 @@ python coco_validation.py \
 
 ### CSV 驗證
 
+`csv_validation.py` 現在有兩種 metric backend：
+
+1. `--metric csv_eval`（預設）：沿用原本 `retinanet/csv_eval.py` 的 mAP 計算。
+2. `--metric iouv5`：使用共用 prediction pipeline 產生 IoU_v5 格式 JSON，最後交給 `IoU_v5.py` 計算 AP。
+
+**原本 `csv_eval` 驗證：**
+
 ```bash
 python csv_validation.py \
+    --metric csv_eval \
     --csv_annotations_path path/to/annotations.csv \
     --model_path path/to/model.pt \
-    --images_path path/to/images_dir \
     --class_list_path path/to/class_list.csv \
-    --iou_threshold 0.5
+    --iou_threshold 0.5 \
+    --score_threshold 0.05
 ```
 
 輸出格式：
 
-```
+```text
 label_1 : (label_1_mAP)
 Precision :  ...
 Recall:  ...
 ```
 
+**使用 `IoU_v5.py` 驗證並輸出 JSON：**
 
+```bash
+python csv_validation.py \
+    --metric iouv5 \
+    --csv_annotations_path path/to/annotations.csv \
+    --images_path path/to/images_dir \
+    --model_path path/to/model.pt \
+    --min_side 704 \
+    --max_side 1920 \
+    --score_threshold 0.05 \
+    --iou_threshold 0.5 \
+    --class_label 0 \
+    --max_detections 150 \
+    --out_gt_json outputs/val_gt.json \
+    --out_pred_json outputs/val_pred.json
+```
+
+注意事項：
+
+- `--metric iouv5` 必須提供 `--images_path`，用來建立完整影像清單與輸出 JSON key。
+- `--class_list_path` 只在 `--metric csv_eval` 時需要；IoU_v5 單類別評估使用 `--class_label` 決定從模型輸出保留哪個 label，STAS 常用 `0`。
+- `--score_threshold` 在 IoU_v5 模式會對應到 `IoU_v5.get_precision_recall(..., conf_score=...)`。
+- `--max_detections` 會限制每張影像輸出的預測框數，預設 `150`，對應 `IoU_v5.check_pred_json()` 的上限。
 
 ---
 
@@ -275,14 +336,58 @@ python eval_stas_vgh_iouv5.py \
 | `--conf_score` | 評估用信心分數門檻 | `0.05` |
 | `--iou_threshold` | IoU 判定門檻 | `0.5` |
 | `--device` | 指定 `cuda` 或 `cpu` | 自動 |
+| `--class_label` | 只輸出模型中的指定類別 label | `0` |
+| `--max_detections` | 每張圖最多保留幾個預測框 | `150` |
 | `--disable_amp_norm` | 停用 AmpNorm | `False` |
+| `--skip_input_check` | 跳過 IoU_v5 JSON key / box / score 格式檢查 | `False` |
 | `--out_pred_json` | 輸出預測 JSON 路徑 | `/root/pytorch-retinanet/stas_vgh_pred.json` |
 | `--out_gt_json` | 輸出 GT JSON 路徑 | `/root/pytorch-retinanet/stas_vgh_gt.json` |
 
 **輸出範例：**
 
-```
+```text
 [result] AP=0.8321  (best-F1 index=42, best-P=0.8500, best-R=0.8100)
+```
+
+這支 script 現在也會透過 `retinanet/iouv5_eval.py` 的共用流程產生 `--out_gt_json` 與 `--out_pred_json`；如果你要讓 `eval_stas_vgh_iouv5.py`、`csv_validation.py --metric iouv5`、以及 `train.py --eval_metric iouv5` 得到可比較的結果，請確認三者使用相同的 `min_side` / `max_side`、`conf_score`、`iou_threshold`、`class_label` 與 `max_detections`。
+
+---
+
+### 共用 IoU_v5 prediction pipeline
+
+本次整理後，以下三個入口都可以使用同一套 `retinanet/iouv5_eval.py` 流程來產生 prediction JSON 並用 `IoU_v5.py` 計算：
+
+| 使用情境 | 指令入口 | 主要用途 |
+|----------|----------|----------|
+| 單次 STAS_VGH 測試 | `eval_stas_vgh_iouv5.py` | 使用預設 STAS_VGH 路徑快速評估 checkpoint |
+| 任意 CSV 驗證集 | `csv_validation.py --metric iouv5` | 對指定 CSV / image folder 產生 GT + prediction JSON 並算 AP |
+| 訓練過程驗證 | `train.py --eval_metric iouv5` | 每個 epoch 結束後用 IoU_v5 AP 記錄驗證結果 |
+
+共用流程會做：
+
+1. 從 CSV 讀取 GT，並用影像檔名 basename 建立 `{image_name: [[x1, y1, x2, y2], ...]}`。
+2. 從 `images_dir` / `csv_val_images` 列出所有 `.jpg`、`.jpeg`、`.png`，讓沒有標註的影像也出現在 GT JSON。
+3. 使用 `min_side` / `max_side` resize，padding 到 32 的倍數，並依 checkpoint 的 `input_preprocessor` 狀態決定 ImageNet normalization 要在 dataloader 端或 model 端做。
+4. 呼叫 RetinaNet eval forward 得到 `scores, labels, boxes`，將 boxes 除以 resize scale 還原回原圖座標。
+5. 只保留 `class_label` 指定類別，score 四捨五入到小數 6 位，依分數排序後最多保留 `max_detections` 個框。
+6. 呼叫 `IoU_v5.get_precision_recall()` 計算 AP、best precision、best recall。
+
+Prediction JSON 格式：
+
+```json
+{
+  "image_001.jpg": [[12, 34, 56, 78, 0.912345]],
+  "image_002.jpg": []
+}
+```
+
+GT JSON 格式：
+
+```json
+{
+  "image_001.jpg": [[10, 30, 58, 80]],
+  "image_002.jpg": []
+}
 ```
 
 ---
@@ -301,6 +406,7 @@ ap, best_box, pr_curve, max_idx = get_precision_recall(
     classes=1,
     conf_score=0.05,
     iou_threshold=0.5,
+    check_inputs=True,  # 若只想快速測試且已確認 JSON 格式，可改成 False
 )
 precision, recall = pr_curve
 ```
@@ -311,7 +417,7 @@ precision, recall = pr_curve
 import pandas as pd
 from IoU_v5 import PR_func
 
-df = pd.DataFrame({'recall': recall, 'precision': precision})
+df = pd.DataFrame([recall, precision])
 pr = PR_func(df, class_names=['STAS'])
 pr.plot_pr_curve(smooth=True)
 print(pr.get_map(mode='smootharea'))

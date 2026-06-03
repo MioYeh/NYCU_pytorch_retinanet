@@ -127,7 +127,7 @@ def read_json(path):
     return json_array
 
 def check_pred_json(gt, pred, upper_limit = 150):
-    if  np.array_equal(gt.keys(), pred.keys()):
+    if sorted(gt.keys()) == sorted(pred.keys()):
         for i in pred:
             if len(pred[i]) > upper_limit:
                 raise ValueError("One picture predicet too many boxes(>150)")
@@ -179,9 +179,10 @@ def get_best_conf_box(pred, best_conf = 0.5):
     
 
 
-def get_precision_recall(gt, pred, classes = 1, conf_score = 0.05, iou_threshold = 0.5):
+def get_precision_recall(gt, pred, classes = 1, conf_score = 0.05, iou_threshold = 0.5, check_inputs = True):
 
-    # if check_pred_json(gt, pred):
+    if check_inputs:
+        check_pred_json(gt, pred)
         
     gt = sorted(gt.items())
     pred = sorted(pred.items())
@@ -217,6 +218,14 @@ def get_precision_recall(gt, pred, classes = 1, conf_score = 0.05, iou_threshold
                         true_positives  = np.append(true_positives, 0)
             num_gts += num_P
 
+        if num_gts == 0:
+            print('No ground-truth boxes found; AP is set to 0.')
+            return 0.0, {}, [[0.0], [0.0]], 0
+
+        if len(scores) == 0:
+            print('No detections found above conf_score; AP is set to 0.')
+            return 0.0, {}, [[0.0], [0.0]], 0
+
         # sort by score
         indices         = np.argsort(-scores)
         true_positives  = true_positives[indices]
@@ -234,13 +243,18 @@ def get_precision_recall(gt, pred, classes = 1, conf_score = 0.05, iou_threshold
             num_FP = num_dets - num_TPP
             Precision = num_TP/(num_TP + num_FP)
             Recall = num_TP/num_gts
-            f1 = 2 / ( (1/ Precision) + (1/ Recall) )
+            if Precision == 0 or Recall == 0:
+                f1 = 0
+            else:
+                f1 = 2 / ( (1/ Precision) + (1/ Recall) )
             # f1 = Precision + Recall
             precision.append(Precision)
             recall.append(Recall)
             f1score.append(f1)
         precision.append(0)
         recall.append(num_TP/num_gts)
+        if len(f1score) == 0:
+            return 0.0, {}, [[0.0], [0.0]], 0
         max_index = np.where(np.array(f1score) == max(f1score))[0][0]
         print('MAX F1: {}, conf_thre:{}, recall: {}, precision: {}'.format(round(max(f1score), 5),  s[0][max_index], round(recall[max_index], 5), round(precision[max_index], 5) ))
         print('recall: {}, precision: {}'.format(round(recall[-2], 5), round(precision[-2], 5)))

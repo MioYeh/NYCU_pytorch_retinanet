@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 
 from retinanet import coco_eval
 from retinanet import csv_eval
+from retinanet import iouv5_eval
 
 # print(torch.__version__.split('.')[0])
 # assert torch.__version__.split('.')[0] == '1'
@@ -39,6 +40,25 @@ def main(args=None):
     parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152, 200, 269', type=int, default=200)
     parser.add_argument('--epochs', help='Number of epochs', type=int, default=200)
     parser.add_argument('--output', help='Output folder to save weights and training log', required=True)
+    parser.add_argument('--eval_metric', choices=['csv_eval', 'iouv5'], default='csv_eval',
+                        help='Validation metric backend for CSV validation data.')
+    parser.add_argument('--csv_val_images', help='Path to validation images directory when --eval_metric iouv5')
+    parser.add_argument('--eval_min_side', type=int, default=704,
+                        help='IoU_v5 eval resize smallest side.')
+    parser.add_argument('--eval_max_side', type=int, default=1920,
+                        help='IoU_v5 eval resize largest side cap.')
+    parser.add_argument('--eval_conf_score', type=float, default=0.05,
+                        help='IoU_v5 confidence threshold.')
+    parser.add_argument('--eval_iou_threshold', type=float, default=0.5,
+                        help='IoU_v5 IoU threshold.')
+    parser.add_argument('--eval_class_label', type=int, default=0,
+                        help='Model class label to export for IoU_v5 single-class evaluation.')
+    parser.add_argument('--eval_max_detections', type=int, default=150,
+                        help='Maximum detections per image for IoU_v5 JSON output.')
+    parser.add_argument('--eval_disable_amp_norm', action='store_true',
+                        help='Disable HarmoFL AmpNorm during IoU_v5 eval/predict.')
+    parser.add_argument('--eval_skip_input_check', action='store_true',
+                        help='Skip IoU_v5 prediction/GT JSON validation before metric calculation.')
 
     parser = parser.parse_args(args)
 
@@ -136,7 +156,7 @@ def main(args=None):
     log_csv_path = os.path.join(parser.output, 'training_log.csv')
     csv_file = open(log_csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(['epoch', 'cls_loss', 'reg_loss', 'total_loss', 'mean_mAP'])
+    csv_writer.writerow(['epoch', 'cls_loss', 'reg_loss', 'total_loss', 'eval_metric', 'eval_AP'])
     csv_file.flush()
 
     for epoch_num in range(parser.epochs):
@@ -199,10 +219,35 @@ def main(args=None):
 
             print('Evaluating dataset')
 
-            mAP = csv_eval.evaluate(dataset_val, retinanet)
+            if parser.eval_metric == 'iouv5':
+                if parser.csv_val_images is None:
+                    raise ValueError('--csv_val_images is required when --eval_metric iouv5')
+                metrics, _gt_json, _pred_json = iouv5_eval.evaluate_model_iouv5(
+                    retinanet,
+                    parser.csv_val_images,
+                    parser.csv_val,
+                    min_side=parser.eval_min_side,
+                    max_side=parser.eval_max_side,
+                    conf_score=parser.eval_conf_score,
+                    iou_threshold=parser.eval_iou_threshold,
+                    class_label=parser.eval_class_label,
+                    max_detections=parser.eval_max_detections,
+                    disable_amp_norm=parser.eval_disable_amp_norm,
+                    check_inputs=not parser.eval_skip_input_check,
+                )
+                mean_mAP = float(metrics['ap'])
+                print(
+                    '[result] IoU_v5 AP={:.5f} best-P={:.5f} best-R={:.5f}'.format(
+                        metrics['ap'],
+                        metrics['best_precision'],
+                        metrics['best_recall'],
+                    )
+                )
+            else:
+                mAP = csv_eval.evaluate(dataset_val, retinanet)
 
-            ap_values = [v[0] for v in mAP.values()]
-            mean_mAP = float(np.mean(ap_values)) if ap_values else 0.0
+                ap_values = [v[0] for v in mAP.values()]
+                mean_mAP = float(np.mean(ap_values)) if ap_values else 0.0
 
         else:
             mean_mAP = ''
@@ -217,6 +262,7 @@ def main(args=None):
             '{:.5f}'.format(np.mean(epoch_cls_loss)) if epoch_cls_loss else '',
             '{:.5f}'.format(np.mean(epoch_reg_loss)) if epoch_reg_loss else '',
             '{:.5f}'.format(np.mean(epoch_loss)) if epoch_loss else '',
+            parser.eval_metric if mean_mAP != '' else '',
             '{:.5f}'.format(mean_mAP) if mean_mAP != '' else '',
         ])
         csv_file.flush()
