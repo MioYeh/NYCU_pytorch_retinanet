@@ -22,11 +22,14 @@ def calc_iou(a, b):
     return IoU
 
 class FocalLoss(nn.Module):
-    #def __init__(self):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
 
     def forward(self, classifications, regressions, anchors, annotations):
-        alpha = 0.25
-        gamma = 2.0
+        alpha = self.alpha
+        gamma = self.gamma
         batch_size = classifications.shape[0]
         classification_losses = []
         regression_losses = []

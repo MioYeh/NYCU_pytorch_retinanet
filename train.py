@@ -39,6 +39,8 @@ def main(args=None):
     parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152, 200, 269', type=int, default=200)
     parser.add_argument('--epochs', help='Number of epochs', type=int, default=200)
     parser.add_argument('--output', help='Output folder to save weights and training log', required=True)
+    parser.add_argument('--focal_alpha', help='Focal loss alpha (positive class weight). Default 0.25', type=float, default=0.25)
+    parser.add_argument('--focal_gamma', help='Focal loss gamma (focusing parameter). Default 2.0', type=float, default=2.0)
 
     parser = parser.parse_args(args)
 
@@ -108,6 +110,11 @@ def main(args=None):
         retinanet = torch.load(done_model_path, weights_only=False)
     else:
         raise ValueError('Unsupported model depth, must be one of 18, 34, 50, 101, 152, 200, 269')
+
+    # Apply focal loss parameters
+    retinanet.focalLoss.alpha = parser.focal_alpha
+    retinanet.focalLoss.gamma = parser.focal_gamma
+    print('Focal loss: alpha={:.2f}  gamma={:.1f}'.format(parser.focal_alpha, parser.focal_gamma))
 
     use_gpu = True
 

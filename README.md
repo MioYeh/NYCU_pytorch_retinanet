@@ -28,7 +28,7 @@ apt-get install tk-dev python-tk
 
 ```bash
 pip install pandas pycocotools opencv-python requests
-pip install tifffile zarr scikit-image  # WSI 推論需要
+pip install tifffile zarr scikit-image pillow  # WSI 推論與畫框工具需要
 ```
 
 ---
@@ -245,6 +245,119 @@ python wsi_infer_on_the_fly.py \
 | `--max_tissue_tiles_per_slide` | 每張 WSI 最多處理的 tile 數，`0` 不限 | `0` |
 | `--no_save_tiles` | 不儲存預測 tile 影像到磁碟 | `False` |
 | `--disable_amp_norm` | 停用 AmpNorm | `False` |
+
+---
+
+### wsi_infer_qupath_roi.py — QuPath 腫瘤外圍 ROI 推論
+
+讀取 WSI 與對應的 QuPath/PathCore `.session.xml` 腫瘤 polygon，先用腫瘤位置決定候選搜尋區，再排除腫瘤本體，保留腫瘤外圍區域進行 STAS 推論。此模式適合想集中搜尋「腫瘤附近一圈」時使用。
+
+> 注意：這不是全 WSI 掃描。`--roi_margin_base` 只定義腫瘤外圍要往外掃多寬；腫瘤 polygon 內部預設會被排除。
+
+```bash
+python wsi_infer_qupath_roi.py \
+    --input_dir /workspace/wsi_with_qupath \
+    --output_dir /workspace/wsi_with_qupath_roi_predicted_tiles \
+    --model_path /workspace/hn10_run/csv_retinanet_100.pt \
+    --class_list /workspace/STAS_VGH/classes.csv \
+    --target_mpp 0.5 \
+    --tile_w 1920 \
+    --tile_h 828 \
+    --stride_w 960 \
+    --stride_h 414 \
+    --min_side 704 \
+    --max_side 1920 \
+    --score_threshold 0.05 \
+    --roi_margin_base 4096
+```
+
+**主要參數：**
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--input_dir` | 含有 WSI 與同名 `.session.xml` 的資料夾 | `/workspace/wsi_with_qupath` |
+| `--output_dir` | 輸出 tile 與 CSV 的資料夾 | `/workspace/wsi_with_qupath_roi_predicted_tiles` |
+| `--roi_margin_base` | 以 level-0 pixel 為單位，腫瘤 polygon 外圍要多掃多寬 | `4096` |
+| `--include_roi_core` | 同時掃描/保留腫瘤 polygon 內部；預設不啟用 | `False` |
+| `--max_roi_tile_fraction` | 若 tile 內腫瘤 polygon 佔比高於此值，跳過該 tile | `0.50` |
+| `--roi_filter_grid` | 估算 tile 腫瘤佔比的取樣格點大小 | `7` |
+| `--stride_w` / `--stride_h` | 滑動步長；小於 tile 尺寸時即為 overlap tiling | `960` / `414` |
+
+輸出 CSV 與一般 WSI 推論相同，另外包含 ROI index、level/base 座標，以及 tile 腫瘤佔比等欄位。
+
+---
+
+### wsi_infer_mask_tumor.py — 全 WSI 腫瘤遮罩後推論
+
+對整張 WSI 做 sliding-window 推論，但每張 tile 送進模型前，先根據 QuPath/PathCore XML polygon 把腫瘤區域遮掉，再進行 STAS 偵測。這個模式適合「整張 WSI 都要看，但不希望腫瘤本體被模型當成 STAS」的情境。
+
+```bash
+python wsi_infer_mask_tumor.py \
+    --input_dir /workspace/wsi_with_qupath \
+    --output_dir /workspace/wsi_mask_tumor_predicted_tiles \
+    --model_path /workspace/hn10_run/csv_retinanet_100.pt \
+    --class_list /workspace/STAS_VGH/classes.csv \
+    --target_mpp 0.5 \
+    --tile_w 1920 \
+    --tile_h 828 \
+    --stride_w 960 \
+    --stride_h 414 \
+    --min_side 704 \
+    --max_side 1920 \
+    --score_threshold 0.05 \
+    --mask_fill white
+```
+
+**主要參數：**
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--input_dir` | 含有 TIFF WSI 的資料夾 | `/workspace/wsi_with_qupath` |
+| `--xml_dir` | 含有同名 `.session.xml` 的資料夾；省略時使用 `--input_dir` | 同 `--input_dir` |
+| `--output_dir` | 輸出 tile 與 CSV 的資料夾 | `/workspace/wsi_mask_tumor_predicted_tiles` |
+| `--mask_fill` | 腫瘤 polygon 遮罩顏色，可選 `white`、`black`、`mean` | `white` |
+| `--save_masked_tiles` | 儲存腫瘤已遮罩的 positive tile；預設儲存原始 tile | `False` |
+| `--drop_detections_inside_tumor` | 丟掉框中心仍落在腫瘤 polygon 內的 detection | `True` |
+| `--keep_detections_inside_tumor` | 保留框中心落在腫瘤內的 detection | `False` |
+| `--stride_w` / `--stride_h` | 滑動步長；小於 tile 尺寸時即為 overlap tiling | `960` / `414` |
+
+輸出檔案：
+
+- `predicted_tiles_manifest.csv` — positive tile 清單，包含 `masked_fraction`、tile 座標與最高分
+- `predicted_detections_global.csv` — detection 的 local/level/base 座標
+- `slide_summary.csv` — 每張 WSI 的 tile 數、被 mask 的 tile 數、positive tile 數與最高分
+
+若要確認腫瘤是否有被遮罩，可加上 `--save_masked_tiles` 重新輸出 masked positive tile。
+
+---
+
+### draw_predicted_boxes.py — 將 STAS 預測框畫回 tile
+
+讀取推論輸出的 `predicted_detections_global.csv`，將每個 detection 的 local box 畫回已存下來的 positive tile，方便人工檢查模型是否真的框到 STAS。
+
+```bash
+python draw_predicted_boxes.py \
+    --output_dir /workspace/wsi_mask_tumor_predicted_tiles \
+    --score_threshold 0.05
+```
+
+輸出會寫到：
+
+```
+<output_dir>/boxed_tiles/
+```
+
+**主要參數：**
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--output_dir` | 推論輸出資料夾，需包含 `predicted_detections_global.csv` 與 tile 圖 | `/workspace/wsi_mask_tumor_predicted_tiles` |
+| `--detections_csv` | detection CSV 路徑；省略時使用 `<output_dir>/predicted_detections_global.csv` | 自動 |
+| `--tiles_root` | `relative_patch_path` 的根目錄；省略時使用 `--output_dir` | 自動 |
+| `--boxed_dir` | 畫框後影像輸出位置；省略時使用 `<output_dir>/boxed_tiles` | 自動 |
+| `--score_threshold` | 只畫出高於此分數的 detection | `0.0` |
+| `--color` | 框線與標籤顏色 | `red` |
+| `--width` | 框線粗細 | `4` |
 
 ---
 
